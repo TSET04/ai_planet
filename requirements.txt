@@ -1,0 +1,10 @@
+streamlit
+faiss-cpu
+sentence-transformers
+pytesseract
+opencv-python
+vosk
+soundfile
+numpy
+python-dotenv
+mistralai
