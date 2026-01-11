@@ -53,3 +53,7 @@ SHORTCUT:
 - E(aX + b) = aE(X) + b
 VARIANCE:
 - Var(X) = E(X²) − [E(X)]²
+
+## Remember
+- "or" represents union 
+- "and" represents intersection 

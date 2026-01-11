@@ -1,10 +1,11 @@
 streamlit
 faiss-cpu
 sentence-transformers
-pytesseract
+easyocr
 opencv-python
 vosk
 soundfile
 numpy
 python-dotenv
 mistralai
+librosa

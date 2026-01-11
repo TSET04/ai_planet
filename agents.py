@@ -6,80 +6,223 @@ from memory import load_memory, save_memory, find_similar_problem
 logger = setup_logger()
 llm = LLM()
 
-def extract_json(text: str):
+def safe_json_extract(text: str) -> dict | None:
     """
-    Extract the first valid JSON object from a string.
+    Extracts the FIRST valid JSON object from text.
+    Returns None if extraction fails.
     """
-    if not text:
-        raise ValueError("Empty LLM response")
+    try:
+        # Match first {...} block (non-greedy)
+        match = re.search(r"\{.*?\}", text, re.DOTALL)
+        if not match:
+            return None
+        return json.loads(match.group())
+    except Exception:
+        return None
 
-    match = re.search(r"\{.*\}", text, re.DOTALL)
-    if not match:
-        raise ValueError("No JSON object found in LLM response")
 
-    return match.group(0)
-
-
-def parser_agent(text):
+def parser_agent(text, clarification_history=None):
+    """
+    Parse math problem into structured format.
+    
+    Args:
+        text: The problem text to parse
+        clarification_history: List of previous Q&A for context (optional)
+    
+    Returns:
+        Dictionary with parsed problem structure
+    """
     logger.info("Parser agent invoked")
 
+    # Check cache first
     cached_output = find_similar_problem(text)
     if cached_output:
         logger.info("Parser agent returning cached solution.")
-        return {"problem_text": text, "formatted_output": cached_output}
+        return {"problem_text": text, "formatted_output": cached_output, "needs_clarification": False}
 
-    prompt = """You are an expert math problem parser with over 20 years of experience. You specialize in breaking down complex math 
+    # Build context from clarification history
+    context_text = ""
+    if clarification_history:
+        previous_qa = "\n\nPrevious clarifications (DO NOT repeat these):\n"
+        for qa in clarification_history:
+            q = qa.get("question", "")
+            a = qa.get("answer", "")
+            if q or a:
+                previous_qa += f"Q: {q}\nA: {a}\n"
+
+    prompt = f"""You are an expert math problem parser with over 20 years of experience. You specialize in breaking down complex math 
     problems into structured JSON format for further processing. Your task is to analyze and extract key information from a 
     given math problem statement.
 
     Convert to JSON:
-    {
+    {{
       "problem_text": "",
       "topic": "",
       "variables": [],
       "constraints": [],
       "needs_clarification": false
-    }
-    If at all you are not able to parse the question or if the question is ambiguous, set needs_clarification to true.
+    }}
+    
+    If the problem is ambiguous, incomplete, or lacks critical information, set needs_clarification to true.
+    {context_text}
     
     Guardrails:
     1. Do not add "```" or "json" in the output
+    2. Consider the clarification history if provided to resolve ambiguities
+    3. Only set needs_clarification to true if information is still missing after considering the context
+    4. For these types of problems, DO NOT flag clarifications:
+    - Standard probability language
+    - Conventionally implied assumptions
+    - Well-defined English probability phrases
+    - Problems that are solvable using standard exam-level interpretations
     """
+    
     res = llm.call([
         {"role": "system", "content": prompt},
         {"role": "user", "content": text}
     ])
 
-    try:
-        parsed = json.loads(res)
-    except Exception as e:
-        logger.error("Parser JSON extraction failed: %s", str(e))
-        parsed = {
-            "problem_text": text,
-            "topic": "unknown",
-            "variables": [],
-            "constraints": [],
-            "needs_clarification": True
-        }
+    parsed = safe_json_extract(res)
+
+    if not isinstance(parsed, dict):
+        logger.error("Parser JSON extraction failed or returned invalid type")
+        parsed = {}
+
+    parsed = {
+        "problem_text": parsed.get("problem_text", text),
+        "topic": parsed.get("topic", "unknown"),
+        "variables": parsed.get("variables", []),
+        "constraints": parsed.get("constraints", []),
+        "needs_clarification": parsed.get("needs_clarification", True)
+    }
 
     logger.info("Parser agent completed successfully")
     return parsed
 
 
-def solver_agent(problem, context, memory=None):
+def clarification_agent(parsed_problem, clarification_history=None):
+    """
+    Generate follow-up questions when a problem needs clarification.
+    
+    Args:
+        parsed_problem: The output from parser_agent containing the ambiguous problem
+        clarification_history: List of previous Q&A to avoid repetition
+    
+    Returns:
+        A dictionary with clarification questions
+    """
+    logger.info("Clarification agent invoked")
+    
+    problem_text = parsed_problem.get("problem_text", "")
+    topic = parsed_problem.get("topic", "unknown")
+    
+    # Build context from previous clarifications
+    previous_qa = ""
+    if clarification_history:
+        previous_qa = "\n\nPrevious clarifications (DO NOT repeat these):\n"
+        for qa in clarification_history:
+            q = qa.get("question", "")
+            a = qa.get("answer", "")
+            if q or a:
+                previous_qa += f"Q: {q}\nA: {a}\n"
+
+    
+    prompt = f"""You are a clarification expert for math problems. A problem has been identified as ambiguous or unclear.
+
+Original Problem:
+{problem_text}
+
+Identified Topic: {topic}
+{previous_qa}
+
+Your task is to generate specific, targeted follow-up questions that will help resolve the ambiguity.
+
+Return your response as JSON:
+{{
+  "questions": [
+    "Question 1?",
+    "Question 2?"
+  ],
+  "reason_for_clarification": "Brief explanation of what's unclear"
+}}
+
+Guidelines:
+1. Ask only essential questions (1-3 maximum)
+2. Be specific and mathematical
+3. Focus on missing information, unclear constraints, or ambiguous terms
+4. DO NOT repeat questions that have already been asked
+5. If previous clarifications exist, build upon them
+6. Do not add "```" or "json" in the output
+7. DO NOT flag clarifications for these:
+- Standard probability language
+- Conventionally implied assumptions
+- Well-defined English probability phrases
+- Problems that are solvable using standard exam-level interpretations
+"""
+    
+    res = llm.call([
+        {"role": "system", "content": "You are a math problem clarification expert."},
+        {"role": "user", "content": prompt}
+    ])
+    
+    clarification = safe_json_extract(res)
+
+    if clarification is None:
+        logger.error("Clarification JSON extraction failed")
+        clarification = {
+            "questions": ["Please provide the missing or unclear details of the problem."],
+            "reason_for_clarification": "Problem statement is incomplete or ambiguous."
+        }
+
+    # Schema safety
+    clarification.setdefault(
+        "questions",
+        ["Please clarify the problem statement."]
+    )
+    clarification.setdefault(
+        "reason_for_clarification",
+        "Additional information is required."
+    )
+
+    logger.info("Clarification agent completed successfully")
+    return clarification
+
+
+def solver_agent(problem, context, memory=None, clarification_context=""):
+    """
+    Solve the math problem using context and memory.
+    
+    Args:
+        problem: The problem text
+        context: Retrieved context from RAG
+        memory: Historical memory
+        clarification_context: String containing clarification Q&A history
+    
+    Returns:
+        Solution text
+    """
     logger.info("Solver agent invoked")
 
     memory = load_memory()
+    
+    # Add clarification context to the prompt if available
+    clarification_section = ""
+    if clarification_context:
+        clarification_section = f"\n\nClarification Context (additional information provided by user):\n{clarification_context}"
+    
     solver_prompt = f"""
-    Your task is to solve the problem {problem} with the following context {context} and the memory {memory}. 
+    Your task is to solve the problem {problem} with the following context {context} and the memory {memory}.
+    {clarification_section}
+    
     Guardrails:
     1. If the context is missing, do not solve the question on your own.
     2. In absence of context, do not talk anything about you giving the solution outside of context. You must stick to context.
     3. You must use memory if present and learn from your past mistakes.
-    4. Do not mention about context or memory in your final answer. Also do not mention about "The context says" or "The context provided"
+    4. Use the clarification context to understand the complete problem requirements.
+    5. Do not mention about context, memory, or clarification in your final answer. Also do not mention about "The context says" or "The context provided"
     in the final answer.
-    5. Provide final answer in a concise manner suitable for competitive exams like JEE.
-    6. Return answer in plain text. Do not use LaTeX, math formatting, or boxed expressions.
+    6. Provide final answer in a concise manner suitable for competitive exams like JEE.
+    7. Return answer in plain text. Do not use LaTeX, math formatting, or boxed expressions.
     """
 
     cached_output = find_similar_problem(problem)
@@ -92,8 +235,6 @@ def solver_agent(problem, context, memory=None):
         {"role": "user", "content": solver_prompt}
     ])
 
-    # Save solution + embedding
-    embedding = llm.embed(problem)
     save_memory({"problem_text": problem, "solution": solution, "formatted_output": solution})
 
     return solution
@@ -125,12 +266,7 @@ def verifier_agent(problem, solution):
 
     # Clean up response
     llm_response_clean = llm_response.strip().lower()
-    if "true" in llm_response_clean:
-        logger.info("Verifier LLM judged solution as CORRECT")
-        return True
-    else:
-        logger.warning("Verifier LLM judged solution as INCORRECT")
-        return False
+    return llm_response_clean == "true"
 
 
 def explainer_agent(solution):
@@ -178,9 +314,6 @@ def explainer_agent(solution):
         {"role": "user", "content": solution}
     ])
 
-    embedding = llm.embed(solution)
     save_memory({"problem_text": solution, "solution": solution, "formatted_output": llm_response})
 
     return llm_response
-
-
