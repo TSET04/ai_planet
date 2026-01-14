@@ -1,4 +1,4 @@
-import json, re
+import json
 from llm import LLM
 from logger import setup_logger
 from memory import load_memory, save_memory, find_similar_problem
@@ -274,32 +274,51 @@ def solver_agent(problem, context, memory=None, clarification_context=""):
 
 
 def verifier_agent(problem, solution):
-    logger.info("Verifier agent evaluating solution using LLM")
+    logger.info("Verifier agent evaluating solution")
 
     prompt = f"""
-    You are a rigorous math verifier for JEE-level problems.
+    You are a strict mathematics solution verifier.
+
+    General rules:
+    - Apply standard mathematical conventions unless explicitly overridden in the problem.
+    - Accept mathematically equivalent answers.
+    - Ignore minor formatting differences.
 
     Problem:
     {problem}
 
-    Solution provided by another agent:
+    Proposed Solution:
     {solution}
 
-    Task:
-    - Verify if the solution is correct.
-    - If correct, answer only: TRUE
-    - If incorrect or partially incorrect, answer only: FALSE
-    - Do not provide explanations or extra text.
-"""
+    Your tasks:
+    1. Determine whether the solution is mathematically correct and complete.
+    2. Assign a confidence score (0–100) based on correctness, logical soundness, and completeness.
+
+    Respond in EXACT JSON format only:
+    {{
+    "is_correct": true | false,
+    "confidence": number
+    }}
+
+    Constraints:
+    - Confidence must be an integer between 0 and 100.
+    - Do NOT include explanations or extra text.
+    """
 
     llm_response = llm.call([
-        {"role": "system", "content": "You are a math verifier AI."},
+        {"role": "system", "content": "You are a mathematical verification engine."},
         {"role": "user", "content": prompt}
     ])
 
-    # Clean up response
-    llm_response_clean = llm_response.strip().lower()
-    return llm_response_clean == "true"
+    try:
+        result = safe_json_extract(llm_response.strip())
+        return {
+            "is_correct": bool(result.get("is_correct", False)),
+            "confidence": int(result.get("confidence", 0))
+        }
+    except Exception as e:
+        logger.error(f"Verifier parsing failed: {e}")
+        return {"is_correct": False, "confidence": 0}
 
 
 def explainer_agent(solution):

@@ -1,5 +1,6 @@
 import streamlit as st
-import tempfile, time
+import tempfile
+import json
 from multimodal import ocr_extract, audio_to_text
 from agents import (
     parser_agent,
@@ -30,18 +31,32 @@ st.markdown("""
 #MainMenu, footer, header, .stDeployButton { visibility: hidden; }
 .block-container { padding-top: 1rem; padding-bottom: 11rem; }
 .app-title { text-align: center; font-weight: 700; color: #9de0ee !important; }
-.chat-box { border: 1px solid #dcdcdc; padding: 12px; margin-bottom: 10px; color: #111; font-size: 0.95rem; }
+
+.chat-box { 
+    border: 1px solid #dcdcdc; 
+    padding: 12px; 
+    margin-bottom: 6px; 
+    color: #111; 
+    font-size: 0.95rem; 
+}
+
 .user-box { background-color: #fcffd2; border-radius: 4px; }
 .assistant-box { background-color: #ffffff; border-left: 4px solid #10b981; }
 .clarification-box { background-color: #fff7e6; border-left: 4px solid #f59e0b; }
 .warning-box { background-color: #fdecea; border-left: 4px solid #ef4444; }
+
 textarea + div { display: none; }
-.stForm {padding:0px;} 
-.stFileUploaderFileName {color: #131313;}
-.stAlert {background-color: crimson;}
-[data-testid="stWidgetLabel"] {color: #131313;}
-[data-testid="stExpanderDetails"] {color: white; border: 2px solid black; border-radius: 0px 0px 6px 6px;}
-.stExpander {background-color: #1a1c24; border-radius: 6px;}            
+.stForm { padding: 0px; } 
+.stFileUploaderFileName { color: #131313; }
+[data-testid="stWidgetLabel"] { color: #131313; }
+
+.stExpander { background-color: #1a1c24; border-radius: 6px; }
+[data-testid="stExpanderDetails"] {
+    color: white;
+    border: 2px solid black;
+    border-radius: 0px 0px 6px 6px;
+}
+.stMarkdown { color: #131313; font-weight:700;}        
 </style>
 """, unsafe_allow_html=True)
 
@@ -62,7 +77,6 @@ for k, v in defaults.items():
 
 # ---------------- Utilities ----------------
 def safe_parse(text):
-    """Always return a dict; fallback sets needs_clarification=True"""
     try:
         out = parser_agent(text)
         if not isinstance(out, dict):
@@ -75,7 +89,7 @@ def safe_parse(text):
 # ---------------- Title ----------------
 st.markdown("<h2 class='app-title'>🧮 Math Agent AI</h2>", unsafe_allow_html=True)
 
-# ---------------- Chat Container (SINGLE SOURCE OF TRUTH) ----------------
+# ---------------- Chat Container ----------------
 chat_container = st.container()
 with chat_container:
     for m in st.session_state.messages:
@@ -86,21 +100,39 @@ with chat_container:
             "warning": "warning-box"
         }.get(m["role"], "assistant-box")
 
+        # Message bubble (rendered ONCE)
         st.markdown(
             f"<div class='chat-box {css}'>{m['content']}</div>",
             unsafe_allow_html=True
         )
+
+        # ----- Assistant metadata -----
         if m["role"] == "assistant":
+
+            # Confidence line
+            confidence = m.get("confidence")
+            verified = m.get("verified")
+
+            if confidence is not None:
+                if verified:
+                    st.caption(f"Confidence: **{confidence}%**")
+                else:
+                    st.caption(f"⚠️ Low confidence · Confidence: **{confidence}%**")
+
+            # RAG docs dropdown
             docs = m.get("rag_docs", [])
             if docs:
-                with st.expander("📚 Retrieved context"):
+                with st.expander("📚 RAG Docs"):
                     for i, d in enumerate(docs, 1):
                         st.markdown(f"**Chunk {i}:**")
                         st.markdown(d)
                         st.markdown("---")
-            else:
-                st.caption("No reference data available.")
 
+            # Agent trace dropdown
+            trace = m.get("agent_trace")
+            if trace:
+                with st.expander("🧠 Agent Trace"):
+                    st.json(trace)
 
 # ---------------- Controls ----------------
 c1, c2, _ = st.columns([1, 1, 6])
@@ -158,8 +190,8 @@ with st.form("chat_form", clear_on_submit=True):
 
 # ---------------- Processing ----------------
 if send and not st.session_state.processing:
-    user_input = user_input.strip()
 
+    user_input = user_input.strip()
     if not user_input:
         st.warning("⚠️ Please enter a math problem before sending.")
         st.stop()
@@ -172,6 +204,7 @@ if send and not st.session_state.processing:
         unsafe_allow_html=True
     )
 
+    # User message
     st.session_state.messages.append({
         "role": "user",
         "content": user_input
@@ -215,27 +248,41 @@ if send and not st.session_state.processing:
     # ---------- Solve ----------
     rag = RAG()
     rag_docs = rag.retrieve(parsed["problem_text"])
+
     solution = solver_agent(parsed["problem_text"], rag_docs)
+    explanation = explainer_agent(solution)
 
-    if verifier_agent(parsed["problem_text"], solution):
-        explanation = explainer_agent(solution)
+    verification = verifier_agent(parsed["problem_text"], solution)
+    print(verification)
 
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": explanation,
-            "rag_docs": rag_docs
-        })
+    # ----- Confidence calibration (ONLY here) -----
+    if verification["is_correct"]:
+        verification["confidence"] = max(verification["confidence"], 30)
 
-        save_memory({
-            "input": user_input,
-            "solution": solution
-        })
-    else:
-        st.session_state.messages.append({
-            "role": "assistant",
-            "content": "❌ Unable to verify the solution.",
-            "rag_docs": []
-        })
+    verification["confidence"] = min(verification["confidence"], 100)
+
+    agent_trace = {
+        "parser_output": parsed,
+        "rag_chunks_used": len(rag_docs),
+        "raw_solution": solution,
+        "verifier_result": verification
+    }
+
+    # ✅ SINGLE assistant message
+    st.session_state.messages.append({
+        "role": "assistant",
+        "content": explanation,
+        "rag_docs": rag_docs,
+        "confidence": verification["confidence"],
+        "verified": verification["is_correct"],
+        "agent_trace": agent_trace
+    })
+
+    save_memory({
+        "input": user_input,
+        "solution": solution,
+        "confidence": verification["confidence"]
+    })
 
     # ---------- Cleanup ----------
     st.session_state.processing = False
