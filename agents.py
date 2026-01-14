@@ -7,16 +7,42 @@ logger = setup_logger()
 llm = LLM()
 
 def safe_json_extract(text: str) -> dict | None:
-    """
-    Extracts the FIRST valid JSON object from text.
-    Returns None if extraction fails.
-    """
+    if not text:
+        return None
+
     try:
-        # Match first {...} block (non-greedy)
-        match = re.search(r"\{.*?\}", text, re.DOTALL)
-        if not match:
+        return json.loads(text.strip())
+    except Exception:
+        pass
+
+    # fallback to recovery
+    try:
+        start = text.find("{")
+        if start == -1:
             return None
-        return json.loads(match.group())
+
+        brace_count = 0
+        in_string = False
+        escape = False
+
+        for i in range(start, len(text)):
+            char = text[i]
+
+            if char == '"' and not escape:
+                in_string = not in_string
+
+            if in_string:
+                escape = (char == "\\" and not escape)
+                continue
+
+            if char == "{":
+                brace_count += 1
+            elif char == "}":
+                brace_count -= 1
+                if brace_count == 0:
+                    return json.loads(text[start:i + 1])
+
+        return None
     except Exception:
         return None
 
@@ -62,13 +88,20 @@ def parser_agent(text, clarification_history=None):
       "constraints": [],
       "needs_clarification": false
     }}
-    
-    If the problem is ambiguous, incomplete, or lacks critical information, set needs_clarification to true.
+
+    Here is the definition for each field:
+    1. problem_text: The original problem statement as a string.
+    2. topic: The main topic of the problem (e.g., Algebra, Calculus, Probability, Linear Algebra).
+    3. variables: A list of key variables mentioned in the problem.
+    4. constraints: A list of any constraints or conditions specified in the problem. If not specified, take the default assumptions.
+    5. needs_clarification: A boolean indicating whether the problem requires further clarification.
+
+    If the problem is incomplete, or lacks critical information, set needs_clarification to true.
     {context_text}
     
     Guardrails:
     1. Do not add "```" or "json" in the output
-    2. Consider the clarification history if provided to resolve ambiguities
+    2. Consider the clarification history if needed.
     3. Only set needs_clarification to true if information is still missing after considering the context
     4. For these types of problems, DO NOT flag clarifications:
     - Standard probability language
@@ -105,7 +138,7 @@ def clarification_agent(parsed_problem, clarification_history=None):
     Generate follow-up questions when a problem needs clarification.
     
     Args:
-        parsed_problem: The output from parser_agent containing the ambiguous problem
+        parsed_problem: The output from parser_agent containing the unclear problem
         clarification_history: List of previous Q&A to avoid repetition
     
     Returns:
@@ -127,7 +160,7 @@ def clarification_agent(parsed_problem, clarification_history=None):
                 previous_qa += f"Q: {q}\nA: {a}\n"
 
     
-    prompt = f"""You are a clarification expert for math problems. A problem has been identified as ambiguous or unclear.
+    prompt = f"""You are a clarification expert for math problems. A problem has been identified as unclear.
 
 Original Problem:
 {problem_text}
@@ -135,7 +168,7 @@ Original Problem:
 Identified Topic: {topic}
 {previous_qa}
 
-Your task is to generate specific, targeted follow-up questions that will help resolve the ambiguity.
+Your task is to generate specific, targeted follow-up questions that will help improve the clarity of the problem.
 
 Return your response as JSON:
 {{
@@ -149,7 +182,7 @@ Return your response as JSON:
 Guidelines:
 1. Ask only essential questions (1-3 maximum)
 2. Be specific and mathematical
-3. Focus on missing information, unclear constraints, or ambiguous terms
+3. Focus on missing information, unclear constraints
 4. DO NOT repeat questions that have already been asked
 5. If previous clarifications exist, build upon them
 6. Do not add "```" or "json" in the output
@@ -171,7 +204,7 @@ Guidelines:
         logger.error("Clarification JSON extraction failed")
         clarification = {
             "questions": ["Please provide the missing or unclear details of the problem."],
-            "reason_for_clarification": "Problem statement is incomplete or ambiguous."
+            "reason_for_clarification": "Problem statement is incomplete."
         }
 
     # Schema safety

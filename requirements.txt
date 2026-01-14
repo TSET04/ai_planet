@@ -9,3 +9,4 @@ numpy
 python-dotenv
 mistralai
 librosa
+openai-whisper

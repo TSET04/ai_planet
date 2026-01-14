@@ -1,17 +1,16 @@
 import json
 import numpy as np
 import soundfile as sf
-import librosa
-from vosk import Model, KaldiRecognizer
 import easyocr
+import whisper
 from PIL import Image
 from logger import setup_logger
 
 logger = setup_logger()
 
-# ---------------- Load Vosk Model ----------------
-vosk_model = Model("models/vosk/vosk-model-small-en-us-0.15")
-logger.info("Vosk model loaded")
+logger.info("Loading Whisper tiny model...")
+whisper_model = whisper.load_model("tiny") 
+logger.info("Whisper model loaded")
 
 # ---------------- OCR Reader Cache ----------------
 reader = None
@@ -44,65 +43,63 @@ def ocr_extract(img):
 
 # ---------------- AUDIO → TEXT (FIXED) ----------------
 def audio_to_text(audio_path):
-    logger.info("Starting audio transcription")
+    """
+    Transcribe audio using Whisper tiny model.
 
-    # 1️⃣ Load audio safely
-    audio, sr = sf.read(audio_path, always_2d=False)
+    Returns:
+        text (str): transcribed text
+        confidence (float): approximate confidence (0-1)
+    """
+    logger.info("Starting audio transcription with Whisper")
 
-    # 2️⃣ Convert to mono
-    if audio.ndim > 1:
-        audio = audio.mean(axis=1)
-        logger.info("Converted stereo to mono")
+    try:
+        # Whisper prefers 16kHz mono, read with soundfile
+        audio, sr = sf.read(audio_path)
+        if len(audio.shape) > 1:
+            audio = audio.mean(axis=1)  # stereo -> mono
 
-    # 3️⃣ Resample to 16kHz (CRITICAL)
-    if sr != 16000:
-        audio = librosa.resample(audio, orig_sr=sr, target_sr=16000)
-        sr = 16000
-        logger.info("Resampled audio to 16kHz")
+        # Save temporary file in WAV format if needed
+        temp_wav = audio_path  # can reuse uploaded path
 
-    # 4️⃣ Normalize amplitude
-    max_amp = np.max(np.abs(audio))
-    if max_amp < 0.01:
-        logger.warning("Audio amplitude too low")
+        # Transcribe
+        result = whisper_model.transcribe(temp_wav, language="en", fp16=False)
+
+        text = result.get("text", "").strip().lower()
+        # Use logprob to estimate confidence if available
+        segments = result.get("segments", [])
+        if segments:
+            avg_conf = sum(seg.get("avg_logprob", 0) for seg in segments) / len(segments)
+            confidence = float(np.exp(avg_conf))  # convert logprob to 0-1 approx
+        else:
+            confidence = 0.9 if text else 0.0
+
+        # Optional: normalize math terms
+        text = normalize_math(text)
+
+        logger.info("Whisper ASR completed with confidence %.2f", confidence)
+        return text, confidence
+
+    except Exception as e:
+        logger.error("Whisper ASR failed: %s", str(e))
         return "", 0.0
-
-    audio = audio / max_amp
-
-    # 5️⃣ Convert float32 → int16 PCM (MANDATORY FOR VOSK)
-    audio_int16 = (audio * 32767).astype(np.int16)
-
-    logger.info(
-        f"Audio stats | sr={sr}, duration={len(audio)/sr:.2f}s, max_amp={max_amp:.3f}"
-    )
-
-    # 6️⃣ Feed audio in chunks (recommended by Vosk)
-    rec = KaldiRecognizer(vosk_model, sr)
-    rec.SetWords(True)
-
-    chunk_size = 4000
-    for i in range(0, len(audio_int16), chunk_size):
-        rec.AcceptWaveform(audio_int16[i:i+chunk_size].tobytes())
-
-    result = json.loads(rec.FinalResult())
-
-    text = normalize_math(result.get("text", "").strip())
-    confidence = estimate_confidence(result)
-
-    logger.info("ASR completed with confidence %.2f", confidence)
-    return text, confidence
 
 
 # ---------------- Text Normalization ----------------
 def normalize_math(text):
     rules = {
-        "square root of": "sqrt",
+        "unde root": "√",
         "raised to the power": "^",
         "to the power of": "^",
         "divided by": "/",
         "times": "*",
         "into": "*",
         "minus": "-",
-        "plus": "+"
+        "plus": "+",
+        "x square": "x^2",
+        "x cube": "x^3",
+        "equals": "=",
+        "equal": "=",
+        "is equal to": "=",
     }
 
     text = text.lower()

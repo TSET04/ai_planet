@@ -40,6 +40,8 @@ textarea + div { display: none; }
 .stFileUploaderFileName {color: #131313;}
 .stAlert {background-color: crimson;}
 [data-testid="stWidgetLabel"] {color: #131313;}
+[data-testid="stExpanderDetails"] {color: white; border: 2px solid black; border-radius: 0px 0px 6px 6px;}
+.stExpander {background-color: #1a1c24; border-radius: 6px;}            
 </style>
 """, unsafe_allow_html=True)
 
@@ -47,8 +49,6 @@ textarea + div { display: none; }
 defaults = {
     "messages": [],
     "processing": False,
-    "awaiting_clarification": False,
-    "original_problem": "",
     "last_input": "",
     "show_image_upload": False,
     "show_audio_upload": False,
@@ -72,32 +72,35 @@ def safe_parse(text):
         logger.warning(f"Parser failed: {e}")
         return {"needs_clarification": True, "problem_text": text}
 
-def typewriter(text, placeholder, delay=0.02, chunk_size=5):
-    rendered = ""
-    for i in range(0, len(text), chunk_size):
-        rendered += text[i:i+chunk_size]
-        placeholder.markdown(
-            f"<div class='chat-box assistant-box'>{rendered}</div>",
-            unsafe_allow_html=True
-        )
-        time.sleep(delay)
-
 # ---------------- Title ----------------
 st.markdown("<h2 class='app-title'>🧮 Math Agent AI</h2>", unsafe_allow_html=True)
 
-# ---------------- Chat History ----------------
-for m in st.session_state.messages:
-    css = {
-        "user": "user-box",
-        "assistant": "assistant-box",
-        "clarification": "clarification-box",
-        "warning": "warning-box"
-    }.get(m["role"], "assistant-box")
+# ---------------- Chat Container (SINGLE SOURCE OF TRUTH) ----------------
+chat_container = st.container()
+with chat_container:
+    for m in st.session_state.messages:
+        css = {
+            "user": "user-box",
+            "assistant": "assistant-box",
+            "clarification": "clarification-box",
+            "warning": "warning-box"
+        }.get(m["role"], "assistant-box")
 
-    st.markdown(
-        f"<div class='chat-box {css}'>{m['content']}</div>",
-        unsafe_allow_html=True
-    )
+        st.markdown(
+            f"<div class='chat-box {css}'>{m['content']}</div>",
+            unsafe_allow_html=True
+        )
+        if m["role"] == "assistant":
+            docs = m.get("rag_docs", [])
+            if docs:
+                with st.expander("📚 Retrieved context"):
+                    for i, d in enumerate(docs, 1):
+                        st.markdown(f"**Chunk {i}:**")
+                        st.markdown(d)
+                        st.markdown("---")
+            else:
+                st.caption("No reference data available.")
+
 
 # ---------------- Controls ----------------
 c1, c2, _ = st.columns([1, 1, 6])
@@ -132,15 +135,14 @@ if st.session_state.show_audio_upload:
 
         if conf < 0.2 or not text.strip():
             st.warning("🎧 No clear speech detected. Please speak clearly and try again.")
-            st.session_state.show_audio_upload = True
-            st.stop()  # prevent further processing
+            st.stop()
 
         st.session_state.audio_confidence = conf
         st.session_state.last_input = text
         st.session_state.show_audio_upload = False
         st.rerun()
 
-# ---------------- Thinking Indicator Placeholder ----------------
+# ---------------- Thinking Indicator ----------------
 thinking_placeholder = st.empty()
 
 # ---------------- Input Form ----------------
@@ -156,10 +158,15 @@ with st.form("chat_form", clear_on_submit=True):
 
 # ---------------- Processing ----------------
 if send and not st.session_state.processing:
+    user_input = user_input.strip()
+
+    if not user_input:
+        st.warning("⚠️ Please enter a math problem before sending.")
+        st.stop()
+
     st.session_state.processing = True
     st.session_state.last_input = ""
 
-    # Show thinking indicator immediately
     thinking_placeholder.markdown(
         "<div class='chat-box assistant-box'>🤔 <b>Thinking...</b></div>",
         unsafe_allow_html=True
@@ -167,18 +174,17 @@ if send and not st.session_state.processing:
 
     st.session_state.messages.append({
         "role": "user",
-        "content": user_input.strip()
+        "content": user_input
     })
 
-    parsed = safe_parse(user_input.strip())
+    parsed = safe_parse(user_input)
 
     # ---------- Clarification ----------
     if parsed.get("needs_clarification", False):
         clarification = clarification_agent(parsed, st.session_state.clarification_history)
 
-        # Add safe/normalized entry to clarification_history
         st.session_state.clarification_history.append({
-            "question": user_input.strip(),
+            "question": user_input,
             "answer": clarification.get("reason_for_clarification", "")
         })
 
@@ -186,9 +192,10 @@ if send and not st.session_state.processing:
             "role": "clarification",
             "content": clarification.get("reason_for_clarification", "")
         })
-        st.session_state.processing = False
-        st.rerun()
 
+        st.session_state.processing = False
+        thinking_placeholder.empty()
+        st.rerun()
 
     # ---------- HITL ----------
     min_conf = min(
@@ -196,7 +203,7 @@ if send and not st.session_state.processing:
         st.session_state.audio_confidence
     )
 
-    if min_conf < 0.85 or needs_hitl(0.9, parsed):
+    if min_conf < 0.5 or needs_hitl(0.5, parsed):
         st.session_state.messages.append({
             "role": "warning",
             "content": f"⚠️ Input unclear or low confidence ({min_conf:.2f}). Please rephrase."
@@ -207,18 +214,16 @@ if send and not st.session_state.processing:
 
     # ---------- Solve ----------
     rag = RAG()
-    ctx = rag.retrieve(parsed["problem_text"])
-    solution = solver_agent(parsed["problem_text"], ctx)
+    rag_docs = rag.retrieve(parsed["problem_text"])
+    solution = solver_agent(parsed["problem_text"], rag_docs)
 
     if verifier_agent(parsed["problem_text"], solution):
         explanation = explainer_agent(solution)
 
-        anim = st.empty()
-        typewriter(explanation, anim)
-
         st.session_state.messages.append({
             "role": "assistant",
-            "content": explanation
+            "content": explanation,
+            "rag_docs": rag_docs
         })
 
         save_memory({
@@ -228,8 +233,13 @@ if send and not st.session_state.processing:
     else:
         st.session_state.messages.append({
             "role": "assistant",
-            "content": "❌ Unable to verify the solution."
+            "content": "❌ Unable to verify the solution.",
+            "rag_docs": []
         })
 
+    # ---------- Cleanup ----------
     st.session_state.processing = False
     thinking_placeholder.empty()
+    st.session_state.image_confidence = 1.0
+    st.session_state.audio_confidence = 1.0
+    st.rerun()
