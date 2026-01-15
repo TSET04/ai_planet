@@ -1,6 +1,5 @@
 import streamlit as st
-import tempfile
-import json
+import tempfile, uuid
 from multimodal import ocr_extract, audio_to_text
 from agents import (
     parser_agent,
@@ -55,8 +54,8 @@ textarea + div { display: none; }
     color: white;
     border: 2px solid black;
     border-radius: 0px 0px 6px 6px;
-}
-.stMarkdown { color: #131313; font-weight:700;}        
+}    
+[data-testid="stCaptionContainer"] { color: black; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -70,6 +69,7 @@ defaults = {
     "image_confidence": 1.0,
     "audio_confidence": 1.0,
     "clarification_history": [],
+    "feedback": {}
 }
 
 for k, v in defaults.items():
@@ -86,8 +86,19 @@ def safe_parse(text):
         logger.warning(f"Parser failed: {e}")
         return {"needs_clarification": True, "problem_text": text}
 
+
+def save_feedback(msg_id, feedback, message):
+    save_memory({
+        "type": "feedback",
+        "message_id": msg_id,
+        "feedback": feedback,
+        "confidence": message.get("confidence"),
+        "verified": message.get("verified"),
+    })
+
+
 # ---------------- Title ----------------
-st.markdown("<h2 class='app-title'>🧮 Math Agent AI</h2>", unsafe_allow_html=True)
+st.markdown("<h2 class='app-title'>Math Agent AI</h2>", unsafe_allow_html=True)
 
 # ---------------- Chat Container ----------------
 chat_container = st.container()
@@ -108,31 +119,52 @@ with chat_container:
 
         # ----- Assistant metadata -----
         if m["role"] == "assistant":
+            msg_id = m.get("id")
+            feedback = st.session_state.feedback.get(msg_id)
 
-            # Confidence line
+            # -------- Confidence --------
             confidence = m.get("confidence")
             verified = m.get("verified")
 
             if confidence is not None:
-                if verified:
+                if confidence >= 50 and verified:
                     st.caption(f"Confidence: **{confidence}%**")
                 else:
                     st.caption(f"⚠️ Low confidence · Confidence: **{confidence}%**")
 
-            # RAG docs dropdown
+            # -------- RAG Docs --------
             docs = m.get("rag_docs", [])
             if docs:
-                with st.expander("📚 RAG Docs"):
+                with st.expander("RAG Docs"):
                     for i, d in enumerate(docs, 1):
                         st.markdown(f"**Chunk {i}:**")
                         st.markdown(d)
                         st.markdown("---")
 
-            # Agent trace dropdown
+            # -------- Agent Trace --------
             trace = m.get("agent_trace")
             if trace:
-                with st.expander("🧠 Agent Trace"):
+                with st.expander("Agent Trace"):
                     st.json(trace)
+
+            # -------- Feedback Buttons --------
+            col1, col2, col3 = st.columns([1, 1, 6])
+
+            if feedback is None:
+                with col1:
+                    if st.button("👍 Like", key=f"like_{msg_id}"):
+                        st.session_state.feedback[msg_id] = "like"
+                        save_feedback(msg_id, "like", m)
+                        st.rerun()
+
+                with col2:
+                    if st.button("👎 Dislike", key=f"dislike_{msg_id}"):
+                        st.session_state.feedback[msg_id] = "dislike"
+                        save_feedback(msg_id, "dislike", m)
+                        st.rerun()
+            else:
+                st.caption("Your feedback has been saved")
+                                
 
 # ---------------- Controls ----------------
 c1, c2, _ = st.columns([1, 1, 6])
@@ -193,14 +225,14 @@ if send and not st.session_state.processing:
 
     user_input = user_input.strip()
     if not user_input:
-        st.warning("⚠️ Please enter a math problem before sending.")
+        st.warning("Please enter a math problem before sending.")
         st.stop()
 
     st.session_state.processing = True
     st.session_state.last_input = ""
 
     thinking_placeholder.markdown(
-        "<div class='chat-box assistant-box'>🤔 <b>Thinking...</b></div>",
+        "<div class='chat-box assistant-box'><b>Thinking...</b></div>",
         unsafe_allow_html=True
     )
 
@@ -239,7 +271,7 @@ if send and not st.session_state.processing:
     if min_conf < 0.5 or needs_hitl(0.5, parsed):
         st.session_state.messages.append({
             "role": "warning",
-            "content": f"⚠️ Input unclear or low confidence ({min_conf:.2f}). Please rephrase."
+            "content": f"Input unclear or low confidence ({min_conf:.2f}). Please rephrase."
         })
         st.session_state.processing = False
         thinking_placeholder.empty()
@@ -268,8 +300,10 @@ if send and not st.session_state.processing:
         "verifier_result": verification
     }
 
-    # ✅ SINGLE assistant message
+
+    msg_id = str(uuid.uuid4())
     st.session_state.messages.append({
+        "id": msg_id,  
         "role": "assistant",
         "content": explanation,
         "rag_docs": rag_docs,

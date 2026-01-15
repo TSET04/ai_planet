@@ -293,6 +293,7 @@ def verifier_agent(problem, solution):
     Your tasks:
     1. Determine whether the solution is mathematically correct and complete.
     2. Assign a confidence score (0–100) based on correctness, logical soundness, and completeness.
+    3. If you give confidence below 20, then return is_correct as false else true.
 
     Respond in EXACT JSON format only:
     {{
