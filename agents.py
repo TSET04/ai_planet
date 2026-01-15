@@ -221,7 +221,7 @@ Guidelines:
     return clarification
 
 
-def solver_agent(problem, context, memory=None, clarification_context=""):
+def solver_agent(problem, context, memory=None, clarification_context="", retry_mode=False):
     """
     Solve the math problem using context and memory.
     
@@ -230,7 +230,8 @@ def solver_agent(problem, context, memory=None, clarification_context=""):
         context: Retrieved context from RAG
         memory: Historical memory
         clarification_context: String containing clarification Q&A history
-    
+        retry_mode: Boolean indicating if this is a retry attempt
+
     Returns:
         Solution text
     """
@@ -370,3 +371,46 @@ def explainer_agent(solution):
     save_memory({"problem_text": solution, "solution": solution, "formatted_output": llm_response})
 
     return llm_response
+
+
+def reference_agent(user_input, problem_index):
+    """
+    Decide whether the user is referring to a past problem.
+    """
+    prompt = f"""
+    You are a conversation reference resolution agent.
+
+    User message:
+    "{user_input}"
+
+    Previously solved problems:
+    {json.dumps(problem_index, indent=2)}
+
+    Your task:
+    - Decide whether the user is referring to a past problem.
+    - If yes, identify the most likely problem_id.
+    - If no, classify as new_problem.
+
+    Return EXACT JSON:
+    {{
+    "intent": "new_problem" | "reference",
+    "problem_id": "<problem_id or null>",
+    "confidence": 0.0
+    }}
+
+    Rules:
+    - Only mark reference if confidence ≥ 0.7
+    - Prefer topic match + recency
+    - Do NOT invent problems
+    """
+
+    res = llm.call([
+        {"role": "system", "content": "You resolve conversational references."},
+        {"role": "user", "content": prompt}
+    ])
+
+    try:
+        return safe_json_extract(res)
+    except Exception:
+        logger.error("Reference agent failed")
+        return {"intent": "new_problem", "problem_id": None, "confidence": 0.0}

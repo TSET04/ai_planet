@@ -6,11 +6,12 @@ from agents import (
     solver_agent,
     explainer_agent,
     verifier_agent,
-    clarification_agent
+    clarification_agent,
+    reference_agent
 )
 from rag import RAG
 from hitl import needs_hitl
-from memory import save_memory
+from memory import save_memory, load_memory
 from logger import setup_logger
 
 logger = setup_logger()
@@ -86,15 +87,35 @@ def safe_parse(text):
         logger.warning(f"Parser failed: {e}")
         return {"needs_clarification": True, "problem_text": text}
 
+def save_problem_index(problem_id, problem_text, topic, turn_index):
+    record = {
+        "type": "problem_index",
+        "problem_id": problem_id,
+        "problem_text": problem_text,
+        "topic": topic,
+        "turn_index": turn_index
+    }
+    save_memory(record)
+
+def load_problem_index(limit=10):
+    memory = load_memory()
+    problems = [m for m in memory if m.get("type") == "problem_index"]
+    return problems[-limit:]
+
 
 def save_feedback(msg_id, feedback, message):
-    save_memory({
+    record = {
         "type": "feedback",
         "message_id": msg_id,
         "feedback": feedback,
         "confidence": message.get("confidence"),
         "verified": message.get("verified"),
-    })
+    }
+
+    if feedback == "dislike":
+        record["needs_resolution"] = True
+
+    save_memory(record)
 
 
 # ---------------- Title ----------------
@@ -161,6 +182,10 @@ with chat_container:
                     if st.button("👎 Dislike", key=f"dislike_{msg_id}"):
                         st.session_state.feedback[msg_id] = "dislike"
                         save_feedback(msg_id, "dislike", m)
+
+                        # ---- trigger resolution ----
+                        st.session_state.processing = True
+                        st.session_state.last_disliked_problem_id = msg_id
                         st.rerun()
             else:
                 st.caption("Your feedback has been saved")
@@ -209,6 +234,80 @@ if st.session_state.show_audio_upload:
 # ---------------- Thinking Indicator ----------------
 thinking_placeholder = st.empty()
 
+# ---------------- Dislike-triggered Resolution ----------------
+if st.session_state.get("last_disliked_problem_id") and st.session_state.processing:
+
+    disliked_id = st.session_state.last_disliked_problem_id
+    problem_index = load_problem_index()
+
+    target = next(
+        (p for p in problem_index if p["problem_id"] == disliked_id),
+        None
+    )
+
+    if not target:
+        st.session_state.processing = False
+        st.session_state.last_disliked_problem_id = None
+        st.warning("Unable to locate the original problem. Please re-enter it.")
+        st.stop()
+
+    problem_text = target["problem_text"]
+
+    # ---- re-run with stronger constraints ----
+    parsed = safe_parse(problem_text)
+
+    rag = RAG()
+    rag_docs = rag.retrieve(problem_text)
+
+    solution = solver_agent(
+        problem_text,
+        rag_docs,
+        retry_mode=True   # ← IMPORTANT (explained below)
+    )
+
+    explanation = explainer_agent(solution)
+
+    verification = verifier_agent(problem_text, solution)
+
+    agent_trace = {
+        "retry": True,
+        "original_problem_id": disliked_id,
+        "parser_output": parsed,
+        "rag_chunks_used": len(rag_docs),
+        "verifier_result": verification
+    }
+
+    msg_id = str(uuid.uuid4())
+    st.session_state.messages.append({
+        "id": msg_id,
+        "role": "assistant",
+        "content": explanation,
+        "rag_docs": rag_docs,
+        "confidence": verification["confidence"],
+        "verified": verification["is_correct"],
+        "agent_trace": agent_trace
+    })
+
+    # Save new resolution attempt
+    save_problem_index(
+        problem_id=msg_id,
+        problem_text=problem_text,
+        topic=parsed.get("topic", "unknown"),
+        turn_index=len(st.session_state.messages)
+    )
+
+    save_memory({
+        "type": "resolution_attempt",
+        "original_problem_id": disliked_id,
+        "new_problem_id": msg_id,
+        "confidence": verification["confidence"]
+    })
+
+    # cleanup
+    st.session_state.processing = False
+    st.session_state.last_disliked_problem_id = None
+    st.rerun()
+
 # ---------------- Input Form ----------------
 with st.form("chat_form", clear_on_submit=True):
     user_input = st.text_area(
@@ -242,7 +341,24 @@ if send and not st.session_state.processing:
         "content": user_input
     })
 
-    parsed = safe_parse(user_input)
+    problem_text = user_input
+    problem_index = load_problem_index()
+    if len(problem_index) == 0:
+        ref_result = {"intent": "new_problem", "confidence": 0.0}
+    else:
+        ref_result = reference_agent(user_input, problem_index)
+
+    if ref_result["intent"] == "reference" and ref_result["confidence"] >= 0.7:
+        target = next(
+            (p for p in problem_index if p["problem_id"] == ref_result["problem_id"]),
+            None
+        )
+        if target:
+            problem_text = target["problem_text"]
+        else:
+            problem_text = user_input
+
+    parsed = safe_parse(problem_text)
 
     # ---------- Clarification ----------
     if parsed.get("needs_clarification", False):
@@ -312,11 +428,20 @@ if send and not st.session_state.processing:
         "agent_trace": agent_trace
     })
 
+    save_problem_index(
+        problem_id=msg_id,
+        problem_text=parsed["problem_text"],
+        topic=parsed.get("topic", "unknown"),
+        turn_index=len(st.session_state.messages)
+    )
+
     save_memory({
-        "input": user_input,
-        "solution": solution,
-        "confidence": verification["confidence"]
+    "type": "solution_record",
+    "problem_id": msg_id,
+    "solution": solution,
+    "confidence": verification["confidence"]
     })
+
 
     # ---------- Cleanup ----------
     st.session_state.processing = False
@@ -324,3 +449,5 @@ if send and not st.session_state.processing:
     st.session_state.image_confidence = 1.0
     st.session_state.audio_confidence = 1.0
     st.rerun()
+
+    
