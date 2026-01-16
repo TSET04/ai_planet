@@ -1,5 +1,5 @@
 import streamlit as st
-import tempfile, uuid
+import tempfile, uuid, os
 from multimodal import ocr_extract, audio_to_text
 from agents import (
     parser_agent,
@@ -15,6 +15,8 @@ from memory import save_memory, load_memory
 from logger import setup_logger
 
 logger = setup_logger()
+IS_CLOUD = os.getenv("STREAMLIT_SERVER_RUNNING") == "true"
+
 
 # ---------------- Page Config ----------------
 st.set_page_config(
@@ -206,30 +208,36 @@ with c2:
 if st.session_state.show_image_upload:
     img = st.file_uploader("Upload image", type=["png", "jpg", "jpeg"])
     if img:
-        text, conf = ocr_extract(img)
-        st.session_state.last_input = text
-        st.session_state.image_confidence = conf
-        st.session_state.show_image_upload = False
-        st.rerun()
+        if IS_CLOUD:
+            st.warning("Image OCR is disabled in cloud deployment.")
+        else:
+            text, conf = ocr_extract(img)
+            st.session_state.last_input = text
+            st.session_state.image_confidence = conf
+            st.session_state.show_image_upload = False
+            st.rerun()
 
 # ---------------- Audio Input ----------------
 if st.session_state.show_audio_upload:
     audio = st.audio_input("Speak your problem")
     if audio:
-        with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
-            f.write(audio.getvalue())
-            path = f.name
+        if IS_CLOUD:
+            st.warning("Audio transcription is disabled in cloud deployment.")
+        else:
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".wav") as f:
+                f.write(audio.getvalue())
+                path = f.name
 
-        text, conf = audio_to_text(path)
+            text, conf = audio_to_text(path)
 
-        if conf < 0.2 or not text.strip():
-            st.warning("🎧 No clear speech detected. Please speak clearly and try again.")
-            st.stop()
+            if conf < 0.2 or not text.strip():
+                st.warning("🎧 No clear speech detected. Please speak clearly and try again.")
+                st.stop()
 
-        st.session_state.audio_confidence = conf
-        st.session_state.last_input = text
-        st.session_state.show_audio_upload = False
-        st.rerun()
+            st.session_state.audio_confidence = conf
+            st.session_state.last_input = text
+            st.session_state.show_audio_upload = False
+            st.rerun()
 
 # ---------------- Thinking Indicator ----------------
 thinking_placeholder = st.empty()

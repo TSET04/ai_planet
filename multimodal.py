@@ -1,16 +1,7 @@
-import json
-import numpy as np
-import soundfile as sf
-import easyocr
-import whisper
-from PIL import Image
 from logger import setup_logger
+import numpy as np
 
 logger = setup_logger()
-
-logger.info("Loading Whisper tiny model...")
-whisper_model = whisper.load_model("tiny") 
-logger.info("Whisper model loaded")
 
 # ---------------- OCR Reader Cache ----------------
 reader = None
@@ -18,6 +9,14 @@ reader = None
 
 # ---------------- OCR ----------------
 def ocr_extract(img):
+    try:
+        import easyocr
+        from PIL import Image
+    except Exception:
+        return {
+            "ok": False,
+            "error": "OCR is not supported in this deployment environment."
+        }
     global reader
     try:
         if reader is None:
@@ -37,7 +36,7 @@ def ocr_extract(img):
         return text, confidence
 
     except Exception as e:
-        logger.exception("OCR failed")
+        logger.exception(f"OCR failed: {e}")
         return "", 0.0
 
 
@@ -50,8 +49,17 @@ def audio_to_text(audio_path):
         text (str): transcribed text
         confidence (float): approximate confidence (0-1)
     """
+    try:
+        import whisper
+        import soundfile as sf
+    except Exception:
+        return {
+            "ok": False,
+            "error": "Audio transcription is not supported in this environment."
+        }
+    
     logger.info("Starting audio transcription with Whisper")
-
+    whisper_model = whisper.load_model("base")
     try:
         # Whisper prefers 16kHz mono, read with soundfile
         audio, sr = sf.read(audio_path)
