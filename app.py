@@ -232,7 +232,6 @@ if st.session_state.show_audio_upload:
 
             if conf < 0.2 or not text.strip():
                 st.warning("🎧 No clear speech detected. Please speak clearly and try again.")
-                st.stop()
 
             st.session_state.audio_confidence = conf
             st.session_state.last_input = text
